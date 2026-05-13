@@ -299,8 +299,8 @@ The paper uses a trained U-Net [32] on 50 NeoBrainS12 T2-weighted images with fu
 ### 13.2 Synthetic Test Image
 The paper evaluates on 50 real MR brain images (384×384, T2-weighted). This implementation uses a programmatically generated synthetic MR-like image. Real images would yield different histogram profiles, principal grey-level distributions, and embedding rates.
 
-### 13.3 pL/pR Chain Recovery
-In the full implementation, each recovery round's `pL` and `pR` values are extracted from the bitstream (the first 16 bits of each round's extracted payload contain the previous round's values). This implementation uses an approximate inverse (incrementing/decrementing pLL/pLR each round). The full chain embedding would require storing pL, pR history in the payload stream.
+### 13.3 16-Pixel LSB Restoration
+The paper stores original LSBs of the 16 header pixels as part of the side information (`SL`, 16 bits) so recovery is perfectly lossless for those pixels too. This implementation zeroes those bits during recovery rather than restoring originals. The 16 pixels represent a negligible fraction (< 0.01%) of the 384×384 image.
 
 ### 13.4 No Comparison with [19] and [27]
 The paper benchmarks against Wu et al. [19] (Otsu background) and Wu et al. [27] (GrabCut background). Re-implementing those methods for side-by-side comparison was outside this implementation's scope.

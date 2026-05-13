@@ -94,64 +94,66 @@ function [I_enh, pLL, pLR, n_embedded] = procedure1_embed(I, tissue_mask, payloa
     % --- Step 2: Preprocessing — histogram shrink (reserve S bins each side)
     img = preprocess_shrink(img, S);
 
-    % --- Step 3: Initialise pL, pR chain (last round stored in LSBs)
-    pL_chain = zeros(1, S);   % record all rounds' pL for embedding chain
-    pR_chain = zeros(1, S);
-
-    pay_ptr   = 1;
+    % --- Step 3: Iterative bin expansion with embedding (Procedure 1)
+    pL_prev = 0;  pR_prev = 0;   % 0,0 → termination signal for recovery
+    pay_ptr = 1;
     n_embedded = 0;
 
     for s = 1:S
         % Find two highest bins among PRINCIPAL grey-levels (Sec. II-A)
         [pL, pR] = find_highest_two_bins(img, tissue_mask, principal);
+        if isnan(pL) || isnan(pR), break; end
 
-        if isnan(pL) || isnan(pR)
-            break;    % no eligible bins remain
-        end
+        % --- Build side-info chain: [pL_prev(8b), pR_prev(8b)] prepended ---
+        % This allows self-contained recovery: decoder reads back pL/pR chain
+        % from the bitstream without any external metadata.
+        pL_prev_bits = uint8(dec2bin(pL_prev,8)' - '0');
+        pR_prev_bits = uint8(dec2bin(pR_prev,8)' - '0');
+        chain_bits   = [pL_prev_bits(:); pR_prev_bits(:)];  % 16 bits
 
-        pL_chain(s) = pL;
-        pR_chain(s) = pR;
+        % Combined stream: chain_bits + remaining payload
+        stream   = [chain_bits(:)', payload(pay_ptr:end)];
 
-        % Apply Eq. (1): embed bits at pL and pR pixels, shift others
-        pL_pixels = find(img == pL);
-        pR_pixels = find(img == pR);
-        n_pL      = numel(pL_pixels);
-        n_pR      = numel(pR_pixels);
+        % Apply Eq.(1): shift pixels outside [pL, pR], embed at pL and pR
+        pL_pix = find(img == pL);
+        pR_pix = find(img == pR);
+        img(img < pL) = img(img < pL) - 1;   % shift left
+        img(img > pR) = img(img > pR) + 1;   % shift right
 
-        % Shift pixels < pL left by 1  and pixels > pR right by 1
-        img(img < pL) = img(img < pL) - 1;
-        img(img > pR) = img(img > pR) + 1;
-
-        % Embed bits into pL pixels (Eq. 1: p' = pL - bi)
+        % Embed into pL pixels: p' = pL - bi  (Eq.1)
+        n_pL = numel(pL_pix);
         for k = 1:n_pL
-            if pay_ptr <= numel(payload)
-                bi = payload(pay_ptr);
-                img(pL_pixels(k)) = pL - bi;
-                pay_ptr = pay_ptr + 1;
-                n_embedded = n_embedded + 1;
+            if k <= numel(stream)
+                img(pL_pix(k)) = pL - stream(k);
+            end
+        end
+        % Embed into pR pixels: p' = pR + bi  (Eq.1)
+        n_pR = numel(pR_pix);
+        for k = 1:n_pR
+            sidx = n_pL + k;
+            if sidx <= numel(stream)
+                img(pR_pix(k)) = pR + stream(sidx);
             end
         end
 
-        % Embed bits into pR pixels (Eq. 1: p' = pR + bi)
-        for k = 1:n_pR
-            if pay_ptr <= numel(payload)
-                bi = payload(pay_ptr);
-                img(pR_pixels(k)) = pR + bi;
-                pay_ptr = pay_ptr + 1;
-                n_embedded = n_embedded + 1;
-            end
-        end
+        % Advance payload pointer (subtract 16 chain bits from first round)
+        n_total = n_pL + n_pR;
+        n_pure  = max(0, n_total - 16);   % first 16 bits are chain, rest payload
+        pay_ptr    = pay_ptr + n_pure;
+        n_embedded = n_embedded + n_pure;
+
+        pL_prev = pL;
+        pR_prev = pR;
     end
 
-    % --- Step 4: Store last round's pL, pR in LSBs of last 16 pixels (Sec.II-B-3)
-    pLL = pL_chain(find(pL_chain > 0, 1, 'last'));
-    pLR = pR_chain(find(pR_chain > 0, 1, 'last'));
-    if isempty(pLL), pLL = 0; end
-    if isempty(pLR), pLR = 0; end
+    % --- Step 4: Store last pL, pR in LSBs of last 16 pixels (Sec.II-B-3)
+    % pLL = last pL_prev, pLR = last pR_prev
+    pLL = pL_prev;  pLR = pR_prev;
+    if pLL == 0, pLL = 0; end   % stays 0 if no rounds ran
+    if pLR == 0, pLR = 0; end
 
     flat  = img(:);
     N     = numel(flat);
-    % Encode pLL (8 bits) and pLR (8 bits) into LSBs of last 16 pixels
     header = [uint8(dec2bin(pLL,8)'-'0'); uint8(dec2bin(pLR,8)'-'0')];
     for bi = 1:16
         flat(N-16+bi) = bitset(uint8(flat(N-16+bi)), 1, header(bi));
@@ -163,14 +165,15 @@ end
 % ==========================================================================
 %  ALGORITHM — PROCEDURE 2: Information Extraction and Image Recovery
 % ==========================================================================
-function [I_rec, payload_out] = procedure2_extract(I_enh, pLL, pLR, S)
-% Inputs:
-%   I_enh      – contrast-enhanced embedded image
-%   pLL, pLR   – last round's pL, pR (from LSBs of last 16 pixels)
-%   S          – number of expansion rounds
-% Outputs:
-%   I_rec      – recovered original image (lossless)
-%   payload_out– extracted bits
+function [I_rec, payload_out] = procedure2_extract(I_enh, ~, ~, S)
+% Inputs:  I_enh     – enhanced embedded image
+%          S         – expansion rounds (passed for loop count)
+% Outputs: I_rec     – recovered original image
+%          payload_out – extracted payload bits
+%
+% Self-contained chain recovery:
+%   Each round's first 16 extracted bits = [pL_prev(8b), pR_prev(8b)].
+%   Termination when pL_prev = pR_prev = 0 (set during first embed round).
 
     img = double(I_enh(:));
     N   = numel(img);
@@ -178,56 +181,58 @@ function [I_rec, payload_out] = procedure2_extract(I_enh, pLL, pLR, S)
 
     % Read pLL, pLR from last 16 pixels' LSBs
     hdr = uint8(bitget(uint8(img(N-15:N)), 1));
-    pLL = bi2de(double(hdr(1:8)'),  'left-msb');
-    pLR = bi2de(double(hdr(9:16)'), 'left-msb');
-
-    cur_pLL = pLL;  cur_pLR = pLR;
+    cur_pL = bi2de(double(hdr(1:8)'),  'left-msb');
+    cur_pR = bi2de(double(hdr(9:16)'), 'left-msb');
 
     for s = S:-1:1
-        % Apply Eq. (2): extract bits from pixels at pLL-1, pLL, pLR, pLR+1
-        % Apply Eq. (3): recover pixel values
+        if cur_pL == 0 && cur_pR == 0, break; end
 
-        bits_this_round = [];
+        bits_round = [];
+
         for idx = 1:N
             p = img(idx);
-            if p == cur_pLL - 1          % Eq.(2): b'=1; Eq.(3): restore to pLL
-                bits_this_round(end+1) = 1; %#ok<AGROW>
-                img(idx) = cur_pLL;
-            elseif p == cur_pLL          % Eq.(2): b'=0; Eq.(3): stays
-                bits_this_round(end+1) = 0; %#ok<AGROW>
-                % pixel value unchanged (= original pL)
-            elseif p == cur_pLR          % Eq.(2): b'=0; Eq.(3): stays
-                bits_this_round(end+1) = 0; %#ok<AGROW>
-            elseif p == cur_pLR + 1      % Eq.(2): b'=1; Eq.(3): restore to pLR
-                bits_this_round(end+1) = 1; %#ok<AGROW>
-                img(idx) = cur_pLR;
-            elseif p < cur_pLL - 1       % Eq.(3): shift right (+1)
+            if p == cur_pL - 1          % Eq.(2): b'=1; Eq.(3): restore pL
+                bits_round(end+1) = 1; %#ok<AGROW>
+                img(idx) = cur_pL;
+            elseif p == cur_pL          % Eq.(2): b'=0
+                bits_round(end+1) = 0; %#ok<AGROW>
+            elseif p == cur_pR          % Eq.(2): b'=0
+                bits_round(end+1) = 0; %#ok<AGROW>
+            elseif p == cur_pR + 1      % Eq.(2): b'=1; Eq.(3): restore pR
+                bits_round(end+1) = 1; %#ok<AGROW>
+                img(idx) = cur_pR;
+            elseif p < cur_pL - 1       % Eq.(3): shift right
                 img(idx) = p + 1;
-            elseif p > cur_pLR + 1       % Eq.(3): shift left (-1)
+            elseif p > cur_pR + 1       % Eq.(3): shift left
                 img(idx) = p - 1;
             end
         end
 
-        payload_out = [bits_this_round, payload_out]; %#ok<AGROW>
-
-        % Update pLL, pLR for previous round
-        % In full implementation these are extracted from the bitstream;
-        % here we use the chain recorded during embedding for correctness.
-        if s > 1
-            cur_pLL = cur_pLL + 1;   % approximate inverse: pL decreases each round
-            cur_pLR = cur_pLR - 1;
+        % First 16 bits of extracted stream = [pL_prev(8b), pR_prev(8b)]
+        if numel(bits_round) >= 16
+            pL_prev = bi2de(double(bits_round(1:8)'),  'left-msb');
+            pR_prev = bi2de(double(bits_round(9:16)'), 'left-msb');
+            pure_bits = bits_round(17:end);
+        else
+            pL_prev = 0;  pR_prev = 0;
+            pure_bits = bits_round;
         end
+
+        payload_out = [pure_bits, payload_out]; %#ok<AGROW>
+        cur_pL = pL_prev;
+        cur_pR = pR_prev;
     end
 
-    % Inverse preprocessing (restore histogram shrink)
+    % Inverse preprocessing
     img = preprocess_expand(img, S);
 
-    % Restore last 16 pixels' LSBs to 0 (conservative)
+    % Restore last 16 pixels' LSBs to 0
     for bi = 1:16
         img(N-16+bi) = bitset(uint8(img(N-16+bi)), 1, 0);
     end
 
     I_rec = uint8(reshape(img, size(I_enh)));
+
 end
 
 % ==========================================================================
