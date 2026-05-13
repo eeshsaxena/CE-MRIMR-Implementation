@@ -317,3 +317,46 @@ The paper notes that patient and authentication data may also be hidden [19],[21
 3. Wu H-T. et al. â€” *IET Image Process.*, Vol. 14, pp. 327â€“336, 2020 (GrabCut-based [27]).
 4. Ronneberger O., Fischer P., Brox T. â€” U-Net, *MICCAI*, Vol. 9351, pp. 234â€“241, 2015.
 5. Gao M-Z. et al. â€” RCEOI/REEOI/RMBEOI definitions, *Adv. Intell. Syst. Appl.*, Vol. 2, 2013.
+
+
+---
+
+## 14. Dataset Availability & Justification
+
+### 14.1 Paper Dataset
+The paper uses the **NeoBrainS12 challenge dataset** — 50 real MRI brain images (384×384, T1-weighted, T2-weighted, and FLAIR) from neonatal subjects, curated for brain tissue segmentation benchmarking.
+
+### 14.2 Download Attempt & Outcome
+| Source | URL | Status |
+|--------|-----|--------|
+| NeoBrainS12 (official) | https://neobrains12.erasmusmc.nl/ | ? Requires institutional registration + approval |
+
+The dataset requires a formal data-sharing agreement with Erasmus Medical Centre (Rotterdam). Access is granted only to registered research teams — not available for automated download.
+
+### 14.3 Substitute Used
+CE_MRIMR.m generates synthetic MR-like brain images via generate_mr_image(384):
+- Gaussian brain mask with simulated white matter (WM), grey matter (GM), and CSF intensity levels
+- Random noise added (s = 8 intensity units) matching typical 1.5T scanner SNR
+- 50 images generated with different ng seeds
+
+### 14.4 Algorithmic Approximations (documented)
+| Paper Element | Paper Method | Implementation |
+|---------------|-------------|----------------|
+| Tissue segmentation | U-Net (trained on NeoBrainS12) | multithresh (multi-level Otsu) |
+| WM/GM/CSF labels | U-Net output masks | Otsu 3-class threshold |
+| Training data | 50 real MRI scans | 50 synthetic MR images |
+
+### 14.5 Scientific Justification
+CE-MRIMR's reversibility and embedding correctness are **independent of image content**:
+- Procedure 1 and 2 operate on grey-level histograms per tissue class
+- Reversibility (isequal = TRUE) verified on synthetic images
+- CE metrics (RCEOI, REEOI, RMBEOI) correctly computed with synthetic tissue labels
+
+The U-Net approximation by Otsu affects the *quality* of tissue boundaries but not the correctness of the embedding/recovery algorithm. Real NeoBrainS12 data would refine segmentation quality only.
+
+### 14.6 How to Use Real NeoBrainS12 Data
+1. Register at https://neobrains12.erasmusmc.nl/ with institutional email
+2. Save approved MRI NIFTI files to CE_MRIMR_Matlab\data\neobrains\
+3. Replace generate_mr_image() calls with 
+iftiread() loader
+4. Replace multithresh with a trained U-Net ONNX model via MATLAB Deep Learning Toolbox
